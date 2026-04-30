@@ -27,6 +27,10 @@
   {%- if v is none -%}—{%- else -%}{{ '%.0f%%'|format(v * 100) }}{%- endif -%}
 {%- endmacro %}
 
+{% macro fmt_secs(v) -%}
+  {%- if v is none -%}—{%- else -%}{{ '%.1f'|format(v) }}s{%- endif -%}
+{%- endmacro %}
+
 <div class="space-y-6">
 
   {# Header strip #}
@@ -109,6 +113,92 @@
       <canvas id="mos-chart"></canvas>
     </div>
     <audio id="call-audio" src="/audio/{{ job_id }}" preload="metadata" class="hidden"></audio>
+  </div>
+
+  {# Conversation flow — silence, talk time, response latency, overlap. #}
+  <div class="rounded-2xl bg-slate-900 ring-1 ring-slate-800 shadow-xl shadow-black/30 p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-sm font-semibold text-slate-200">Conversation flow</h3>
+      {% if is_stereo and conversation.turn_count is not none %}
+      <span class="text-xs text-slate-500">
+        Turns: <span class="text-slate-300 font-medium tabular-nums">{{ conversation.turn_count }}</span>
+        {% if conversation.max_response_latency_s is not none %}
+          · Max gap: <span class="text-slate-300 font-medium tabular-nums">{{ fmt_secs(conversation.max_response_latency_s) }}</span>
+        {% endif %}
+      </span>
+      {% endif %}
+    </div>
+
+    <div class="grid gap-4 grid-cols-1 sm:grid-cols-2 {% if is_stereo %}lg:grid-cols-4{% else %}lg:grid-cols-2{% endif %}">
+
+      {# Silence (mutual) #}
+      <div class="rounded-xl bg-slate-950/40 ring-1 ring-slate-800 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500">Silence (mutual)</div>
+        <div class="mt-2 flex items-baseline gap-2">
+          <span class="text-2xl font-bold text-slate-100 tabular-nums">{{ fmt_mmss(conversation.mutual_silence_s) }}</span>
+          <span class="text-sm text-slate-400 tabular-nums">{{ fmt_pct(conversation.mutual_silence_frac) }}</span>
+        </div>
+        <p class="mt-1 text-xs text-slate-500">Time when neither leg is speaking.</p>
+      </div>
+
+      {# Talk time #}
+      <div class="rounded-xl bg-slate-950/40 ring-1 ring-slate-800 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500">Talk time</div>
+        <dl class="mt-2 space-y-1.5 text-sm">
+          <div class="flex items-baseline justify-between gap-3">
+            <dt class="flex items-center gap-1.5 text-slate-400">
+              <span class="h-2 w-2 rounded-full bg-indigo-400"></span>
+              {% if is_stereo %}A-leg{% else %}Mono{% endif %}
+            </dt>
+            <dd class="font-medium text-slate-100 tabular-nums">
+              {{ fmt_mmss(conversation.a_talk_s) }}
+              <span class="text-xs text-slate-400 ml-1">{{ fmt_pct(conversation.a_talk_frac) }}</span>
+            </dd>
+          </div>
+          {% if is_stereo %}
+          <div class="flex items-baseline justify-between gap-3">
+            <dt class="flex items-center gap-1.5 text-slate-400">
+              <span class="h-2 w-2 rounded-full bg-emerald-400"></span>
+              B-leg
+            </dt>
+            <dd class="font-medium text-slate-100 tabular-nums">
+              {{ fmt_mmss(conversation.b_talk_s) }}
+              <span class="text-xs text-slate-400 ml-1">{{ fmt_pct(conversation.b_talk_frac) }}</span>
+            </dd>
+          </div>
+          {% endif %}
+        </dl>
+      </div>
+
+      {% if is_stereo %}
+      {# Response latency (turn gaps) #}
+      <div class="rounded-xl bg-slate-950/40 ring-1 ring-slate-800 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500">Response latency (median)</div>
+        <dl class="mt-2 space-y-1.5 text-sm">
+          <div class="flex items-baseline justify-between gap-3">
+            <dt class="text-slate-400">A → B</dt>
+            <dd class="font-medium text-slate-100 tabular-nums">{{ fmt_secs(conversation.median_response_latency_a_to_b_s) }}</dd>
+          </div>
+          <div class="flex items-baseline justify-between gap-3">
+            <dt class="text-slate-400">B → A</dt>
+            <dd class="font-medium text-slate-100 tabular-nums">{{ fmt_secs(conversation.median_response_latency_b_to_a_s) }}</dd>
+          </div>
+        </dl>
+        <p class="mt-1 text-xs text-slate-500">Gap from one leg ending to the other replying.</p>
+      </div>
+
+      {# Overlap (double-talk) #}
+      <div class="rounded-xl bg-slate-950/40 ring-1 ring-slate-800 p-4">
+        <div class="text-xs uppercase tracking-wide text-slate-500">Overlap (double-talk)</div>
+        <div class="mt-2 flex items-baseline gap-2">
+          <span class="text-2xl font-bold text-slate-100 tabular-nums">{{ fmt_mmss(conversation.overlap_s) }}</span>
+          <span class="text-sm text-slate-400 tabular-nums">{{ fmt_pct(conversation.overlap_frac) }}</span>
+        </div>
+        <p class="mt-1 text-xs text-slate-500">Both legs speaking simultaneously.</p>
+      </div>
+      {% endif %}
+
+    </div>
   </div>
 
   {# Worst moments — match the leg-card layout. #}
