@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 import torch
@@ -14,6 +15,14 @@ TARGET_SR = 16000
 WINDOW_SECONDS = 8.0
 HOP_SECONDS = 2.0
 SILENCE_RMS = 0.01
+# A scoring window counts as voiced only if at least this fraction of its
+# samples falls inside a Silero-VAD speech segment. Tuned so a window where
+# the talker starts mid-window still scores, but pure pre-speech hiss does not.
+MIN_SPEECH_OVERLAP_FRAC = 0.3
+# Split the MOS forward pass into mini-batches so we can emit progress between them.
+SCORE_MINIBATCH = 16
+
+ProgressCb = Callable[[str, float], None]
 
 
 class AudioValidationError(ValueError):
@@ -150,9 +159,59 @@ def _aggregate(windows: list[WindowResult]) -> dict:
     )
 
 
-def _score_leg(label: str, leg: torch.Tensor, model) -> LegResult:
+def _vad_speech_mask(leg: torch.Tensor, starts: list[int], vad) -> np.ndarray:
+    """Per-window boolean mask: True iff a scoring window overlaps speech.
+
+    Runs Silero VAD once on the full leg to get speech sample-ranges, then
+    computes per-window overlap fraction. Returns all-True if vad is None
+    (graceful fallback so analysis still works without VAD loaded).
+    """
+    n_windows = len(starts)
+    if n_windows == 0:
+        return np.zeros(0, dtype=bool)
+    if vad is None:
+        return np.ones(n_windows, dtype=bool)
+
+    from silero_vad import get_speech_timestamps
+
+    win = int(WINDOW_SECONDS * TARGET_SR)
+    speech = get_speech_timestamps(
+        leg, vad, sampling_rate=TARGET_SR, return_seconds=False
+    )
+    if not speech:
+        return np.zeros(n_windows, dtype=bool)
+
+    mask = np.zeros(n_windows, dtype=bool)
+    min_overlap = int(MIN_SPEECH_OVERLAP_FRAC * win)
+    for i, s in enumerate(starts):
+        end = s + win
+        overlap = 0
+        for seg in speech:
+            seg_s, seg_e = seg["start"], seg["end"]
+            if seg_e <= s:
+                continue
+            if seg_s >= end:
+                break  # speech ranges are ordered; no later seg can overlap.
+            overlap += min(end, seg_e) - max(s, seg_s)
+            if overlap >= min_overlap:
+                break
+        mask[i] = overlap >= min_overlap
+    return mask
+
+
+def _score_leg(
+    label: str,
+    leg: torch.Tensor,
+    model,
+    vad,
+    progress_cb: ProgressCb | None = None,
+    progress_range: tuple[float, float] = (0.0, 1.0),
+) -> LegResult:
+    lo, hi = progress_range
     starts, chunks = _split_windows(leg)
     if chunks.numel() == 0:
+        if progress_cb:
+            progress_cb(f"No audio in {label}", hi)
         return LegResult(
             label=label,
             windows=[],
@@ -164,17 +223,31 @@ def _score_leg(label: str, leg: torch.Tensor, model) -> LegResult:
             voiced_seconds=0.0,
         )
 
+    if progress_cb:
+        progress_cb(f"Detecting speech ({label})…", lo)
     rms = torch.sqrt(torch.mean(chunks**2, dim=1)).cpu().numpy()
-    voiced_mask = rms >= SILENCE_RMS
+    speech_mask = _vad_speech_mask(leg, starts, vad)
+    voiced_mask = speech_mask & (rms >= SILENCE_RMS)
 
     mos_per_window: dict[int, float] = {}
     if voiced_mask.any():
         voiced_idx = np.where(voiced_mask)[0]
-        batch = chunks[voiced_idx]
-        with torch.no_grad():
-            preds = model(batch).detach().cpu().numpy().reshape(-1)
-        for i, score in zip(voiced_idx, preds):
-            mos_per_window[int(i)] = float(score)
+        total = len(voiced_idx)
+        for start in range(0, total, SCORE_MINIBATCH):
+            sub = voiced_idx[start : start + SCORE_MINIBATCH]
+            with torch.no_grad():
+                preds = model(chunks[sub]).detach().cpu().numpy().reshape(-1)
+            for i, score in zip(sub, preds):
+                mos_per_window[int(i)] = float(score)
+            if progress_cb:
+                done = start + len(sub)
+                frac = done / total
+                progress_cb(
+                    f"Scoring {label}… {done}/{total} windows",
+                    lo + (hi - lo) * frac,
+                )
+    elif progress_cb:
+        progress_cb(f"No voiced windows in {label}", hi)
 
     windows: list[WindowResult] = []
     for i, s in enumerate(starts):
@@ -192,21 +265,37 @@ def _score_leg(label: str, leg: torch.Tensor, model) -> LegResult:
     return LegResult(label=label, windows=windows, **agg)
 
 
-def analyze(data: bytes, filename: str, model) -> AnalysisResult:
+def analyze(
+    data: bytes,
+    filename: str,
+    model,
+    vad=None,
+    progress_cb: ProgressCb | None = None,
+) -> AnalysisResult:
     """End-to-end analysis of a mono or stereo WAV byte payload."""
+    if progress_cb:
+        progress_cb("Loading audio…", 0.0)
     waveform, sr = load_wav(data)
     duration = waveform.shape[-1] / sr
     waveform = resample_if_needed(waveform, sr)
+    if progress_cb:
+        progress_cb("Loaded audio", 0.03)
 
     is_stereo = waveform.shape[0] >= 2
     leg_a_t = waveform[0].contiguous()
     leg_a_label = "A-leg (caller)" if is_stereo else "Mono recording"
-    leg_a = _score_leg(leg_a_label, leg_a_t, model)
+    a_range = (0.03, 0.50) if is_stereo else (0.03, 0.97)
+    leg_a = _score_leg(leg_a_label, leg_a_t, model, vad, progress_cb, a_range)
 
     leg_b: LegResult | None = None
     if is_stereo:
         leg_b_t = waveform[1].contiguous()
-        leg_b = _score_leg("B-leg (callee)", leg_b_t, model)
+        leg_b = _score_leg(
+            "B-leg (callee)", leg_b_t, model, vad, progress_cb, (0.50, 0.97)
+        )
+
+    if progress_cb:
+        progress_cb("Finalizing…", 0.98)
 
     return AnalysisResult(
         filename=filename,

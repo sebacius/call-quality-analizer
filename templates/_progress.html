@@ -1,0 +1,20 @@
+<div id="analysis-progress"
+     hx-get="/progress/{{ job.job_id }}"
+     hx-trigger="every 500ms"
+     hx-target="#results"
+     hx-swap="innerHTML"
+     class="rounded-2xl bg-slate-900 ring-1 ring-slate-800 shadow-xl shadow-black/30 p-8 flex flex-col items-center gap-4">
+  <svg class="animate-spin h-8 w-8 text-indigo-400" xmlns="http://www.w3.org/2000/svg"
+       fill="none" viewBox="0 0 24 24">
+    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+    <path class="opacity-75" fill="currentColor"
+          d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+  </svg>
+  <div class="text-sm font-medium text-slate-200">{{ job.stage }}</div>
+  <div class="w-full max-w-md h-1.5 rounded-full bg-slate-800 overflow-hidden">
+    <div class="h-full bg-indigo-500 transition-[width] duration-200"
+         style="width: {{ '%.1f' % job.percent }}%"></div>
+  </div>
+  <div class="text-xs text-slate-500 tabular-nums">{{ '%.0f' % job.percent }}%</div>
+  <div class="text-xs text-slate-500 text-center">Scoring with Distill-MOS &mdash; long recordings take a moment.</div>
+</div>
