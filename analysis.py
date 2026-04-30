@@ -47,6 +47,7 @@ class LegResult:
     pct_below_3: float | None
     worst_window_timestamp: float | None
     voiced_seconds: float
+    speech_segments: list[tuple[float, float]]  # (start_s, end_s) from Silero VAD
 
     def status(self) -> str:
         m = self.mos_median
@@ -62,12 +63,30 @@ class LegResult:
 
 
 @dataclass
+class ConversationMetrics:
+    """Stereo-derived flow metrics: silence, talk, overlap, turn-taking latency.
+
+    For mono recordings only `mutual_silence_s` and `a_talk_s` are populated;
+    inter-leg fields are None since there is no second speaker channel.
+    """
+    mutual_silence_s: float
+    a_talk_s: float
+    b_talk_s: float | None
+    overlap_s: float | None
+    turn_count: int | None
+    median_response_latency_a_to_b_s: float | None
+    median_response_latency_b_to_a_s: float | None
+    max_response_latency_s: float | None
+
+
+@dataclass
 class AnalysisResult:
     filename: str
     duration_seconds: float
     sample_rate_in: int
     leg_a: LegResult
     leg_b: LegResult | None  # None when the input is mono.
+    conversation: ConversationMetrics
 
 
 def load_wav(data: bytes) -> tuple[torch.Tensor, int]:
@@ -159,18 +178,19 @@ def _aggregate(windows: list[WindowResult]) -> dict:
     )
 
 
-def _vad_speech_mask(leg: torch.Tensor, starts: list[int], vad) -> np.ndarray:
-    """Per-window boolean mask: True iff a scoring window overlaps speech.
+def _vad_speech_mask(
+    leg: torch.Tensor, starts: list[int], vad
+) -> tuple[np.ndarray, list[tuple[float, float]]]:
+    """Per-window boolean mask plus the underlying VAD speech segments in seconds.
 
     Runs Silero VAD once on the full leg to get speech sample-ranges, then
-    computes per-window overlap fraction. Returns all-True if vad is None
-    (graceful fallback so analysis still works without VAD loaded).
+    computes per-window overlap fraction. Returns all-True (and an empty
+    segment list) if vad is None — graceful fallback so analysis still works
+    without VAD loaded.
     """
     n_windows = len(starts)
-    if n_windows == 0:
-        return np.zeros(0, dtype=bool)
     if vad is None:
-        return np.ones(n_windows, dtype=bool)
+        return np.ones(n_windows, dtype=bool), []
 
     from silero_vad import get_speech_timestamps
 
@@ -178,8 +198,12 @@ def _vad_speech_mask(leg: torch.Tensor, starts: list[int], vad) -> np.ndarray:
     speech = get_speech_timestamps(
         leg, vad, sampling_rate=TARGET_SR, return_seconds=False
     )
-    if not speech:
-        return np.zeros(n_windows, dtype=bool)
+    segments_s: list[tuple[float, float]] = [
+        (seg["start"] / TARGET_SR, seg["end"] / TARGET_SR) for seg in speech
+    ]
+
+    if n_windows == 0 or not speech:
+        return np.zeros(n_windows, dtype=bool), segments_s
 
     mask = np.zeros(n_windows, dtype=bool)
     min_overlap = int(MIN_SPEECH_OVERLAP_FRAC * win)
@@ -196,7 +220,7 @@ def _vad_speech_mask(leg: torch.Tensor, starts: list[int], vad) -> np.ndarray:
             if overlap >= min_overlap:
                 break
         mask[i] = overlap >= min_overlap
-    return mask
+    return mask, segments_s
 
 
 def _score_leg(
@@ -221,12 +245,13 @@ def _score_leg(
             pct_below_3=None,
             worst_window_timestamp=None,
             voiced_seconds=0.0,
+            speech_segments=[],
         )
 
     if progress_cb:
         progress_cb(f"Detecting speech ({label})…", lo)
     rms = torch.sqrt(torch.mean(chunks**2, dim=1)).cpu().numpy()
-    speech_mask = _vad_speech_mask(leg, starts, vad)
+    speech_mask, speech_segments = _vad_speech_mask(leg, starts, vad)
     voiced_mask = speech_mask & (rms >= SILENCE_RMS)
 
     mos_per_window: dict[int, float] = {}
@@ -262,7 +287,128 @@ def _score_leg(
         )
 
     agg = _aggregate(windows)
-    return LegResult(label=label, windows=windows, **agg)
+    return LegResult(
+        label=label, windows=windows, speech_segments=speech_segments, **agg
+    )
+
+
+def _merge_intervals(
+    segs: list[tuple[float, float]], duration_s: float
+) -> list[tuple[float, float]]:
+    """Clip to [0, duration_s], drop empties, merge overlapping/adjacent intervals."""
+    cleaned: list[tuple[float, float]] = []
+    for s, e in segs:
+        s = max(0.0, min(float(s), duration_s))
+        e = max(0.0, min(float(e), duration_s))
+        if e > s:
+            cleaned.append((s, e))
+    if not cleaned:
+        return []
+    cleaned.sort()
+    merged: list[tuple[float, float]] = [cleaned[0]]
+    for s, e in cleaned[1:]:
+        ps, pe = merged[-1]
+        if s <= pe:
+            merged[-1] = (ps, max(pe, e))
+        else:
+            merged.append((s, e))
+    return merged
+
+
+def _interval_union_length(
+    a: list[tuple[float, float]], b: list[tuple[float, float]]
+) -> float:
+    """Total length of the union of two sets of intervals (each pre-merged)."""
+    events: list[tuple[float, float]] = sorted(a + b)
+    if not events:
+        return 0.0
+    total = 0.0
+    cur_s, cur_e = events[0]
+    for s, e in events[1:]:
+        if s <= cur_e:
+            cur_e = max(cur_e, e)
+        else:
+            total += cur_e - cur_s
+            cur_s, cur_e = s, e
+    total += cur_e - cur_s
+    return total
+
+
+def compute_turn_metrics(
+    a_segments: list[tuple[float, float]],
+    b_segments: list[tuple[float, float]] | None,
+    duration_s: float,
+) -> ConversationMetrics:
+    """Compute silence/talk/overlap/turn metrics from per-leg VAD segments.
+
+    For mono input pass `b_segments=None`; only `mutual_silence_s` and
+    `a_talk_s` will be populated.
+
+    Turn-taking heuristic: walk all segments sorted by start time, treating
+    consecutive same-leg segments as one turn. A handoff is when the new
+    segment's leg differs from the previous one; the latency is
+    `max(0, this.start - prev.end)`. Negative gaps (barge-in / overlap) clamp
+    to 0 here and surface separately as `overlap_s`.
+    """
+    a = _merge_intervals(a_segments, duration_s)
+    a_talk = sum(e - s for s, e in a)
+
+    if b_segments is None:
+        union = sum(e - s for s, e in a)
+        return ConversationMetrics(
+            mutual_silence_s=max(0.0, duration_s - union),
+            a_talk_s=a_talk,
+            b_talk_s=None,
+            overlap_s=None,
+            turn_count=None,
+            median_response_latency_a_to_b_s=None,
+            median_response_latency_b_to_a_s=None,
+            max_response_latency_s=None,
+        )
+
+    b = _merge_intervals(b_segments, duration_s)
+    b_talk = sum(e - s for s, e in b)
+    union = _interval_union_length(a, b)
+    overlap = max(0.0, a_talk + b_talk - union)
+    mutual_silence = max(0.0, duration_s - union)
+
+    events: list[tuple[float, float, str]] = (
+        [(s, e, "a") for s, e in a] + [(s, e, "b") for s, e in b]
+    )
+    events.sort()
+
+    a_to_b: list[float] = []
+    b_to_a: list[float] = []
+    turn_count = 0
+    prev_leg: str | None = None
+    prev_end: float = 0.0
+    for s, e, leg in events:
+        if prev_leg is None:
+            prev_leg, prev_end = leg, e
+            continue
+        if leg != prev_leg:
+            turn_count += 1
+            gap = max(0.0, s - prev_end)
+            (a_to_b if prev_leg == "a" else b_to_a).append(gap)
+            prev_leg = leg
+            prev_end = e
+        else:
+            prev_end = max(prev_end, e)
+
+    def _median(xs: list[float]) -> float | None:
+        return float(np.median(xs)) if xs else None
+
+    all_latencies = a_to_b + b_to_a
+    return ConversationMetrics(
+        mutual_silence_s=mutual_silence,
+        a_talk_s=a_talk,
+        b_talk_s=b_talk,
+        overlap_s=overlap,
+        turn_count=turn_count,
+        median_response_latency_a_to_b_s=_median(a_to_b),
+        median_response_latency_b_to_a_s=_median(b_to_a),
+        max_response_latency_s=float(max(all_latencies)) if all_latencies else None,
+    )
 
 
 def analyze(
@@ -297,12 +443,19 @@ def analyze(
     if progress_cb:
         progress_cb("Finalizing…", 0.98)
 
+    conversation = compute_turn_metrics(
+        leg_a.speech_segments,
+        leg_b.speech_segments if leg_b is not None else None,
+        duration,
+    )
+
     return AnalysisResult(
         filename=filename,
         duration_seconds=duration,
         sample_rate_in=sr,
         leg_a=leg_a,
         leg_b=leg_b,
+        conversation=conversation,
     )
 
 
@@ -348,6 +501,29 @@ def result_to_template_context(result: AnalysisResult) -> dict:
     if result.leg_b is not None:
         chart_data["leg_b"] = chart_points(result.leg_b)
 
+    cm = result.conversation
+    dur = result.duration_seconds or 0.0
+
+    def _frac(x: float | None) -> float | None:
+        if x is None or dur <= 0:
+            return None
+        return x / dur
+
+    conversation = {
+        "mutual_silence_s": cm.mutual_silence_s,
+        "mutual_silence_frac": _frac(cm.mutual_silence_s),
+        "a_talk_s": cm.a_talk_s,
+        "a_talk_frac": _frac(cm.a_talk_s),
+        "b_talk_s": cm.b_talk_s,
+        "b_talk_frac": _frac(cm.b_talk_s),
+        "overlap_s": cm.overlap_s,
+        "overlap_frac": _frac(cm.overlap_s),
+        "turn_count": cm.turn_count,
+        "median_response_latency_a_to_b_s": cm.median_response_latency_a_to_b_s,
+        "median_response_latency_b_to_a_s": cm.median_response_latency_b_to_a_s,
+        "max_response_latency_s": cm.max_response_latency_s,
+    }
+
     return {
         "filename": result.filename,
         "duration_seconds": result.duration_seconds,
@@ -357,4 +533,5 @@ def result_to_template_context(result: AnalysisResult) -> dict:
         "leg_a_worst": worst_moments(result.leg_a),
         "leg_b_worst": worst_moments(result.leg_b) if result.leg_b is not None else None,
         "chart_data": chart_data,
+        "conversation": conversation,
     }
