@@ -89,7 +89,15 @@
   {# Chart card #}
   <div class="rounded-2xl bg-slate-900 ring-1 ring-slate-800 shadow-xl shadow-black/30 p-6">
     <div class="flex items-center justify-between mb-4">
-      <h3 class="text-sm font-semibold text-slate-200">Quality over time</h3>
+      <div class="flex items-center gap-3">
+        <button id="play-toggle" type="button" aria-label="Play"
+                class="inline-flex items-center justify-center h-8 w-8 rounded-full bg-slate-800 ring-1 ring-slate-700 text-slate-200 hover:bg-slate-700 hover:text-white transition focus:outline-none focus:ring-2 focus:ring-indigo-400">
+          <svg id="play-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4"><path d="M8 5v14l11-7z"/></svg>
+          <svg id="pause-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-4 w-4 hidden"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+        </button>
+        <h3 class="text-sm font-semibold text-slate-200">Quality over time</h3>
+        <span id="play-time" class="text-xs text-slate-400 tabular-nums">0:00</span>
+      </div>
       <div class="flex items-center gap-4 text-xs text-slate-400">
         <span class="inline-flex items-center gap-1.5"><span class="h-2 w-2 rounded-full bg-indigo-400"></span>{% if is_stereo %}A-leg{% else %}Mono{% endif %}</span>
         {% if is_stereo %}
@@ -100,6 +108,7 @@
     <div class="relative h-[360px]">
       <canvas id="mos-chart"></canvas>
     </div>
+    <audio id="call-audio" src="/audio/{{ job_id }}" preload="metadata" class="hidden"></audio>
   </div>
 
   {# Worst moments — match the leg-card layout. #}
@@ -271,10 +280,143 @@
             drawLine(3.0, 'rgba(251, 191, 36, 0.85)');
             drawLine(4.0, 'rgba(52, 211, 153, 0.85)');
           },
+        }, {
+          id: 'waveform',
+          beforeDatasetsDraw(chart) {
+            const wf = window.__waveform;
+            if (!wf) return;
+            const { ctx, chartArea: a, scales: { x } } = chart;
+            // Reserve the bottom ~28% of the chart for stacked waveform lanes.
+            const bandH = (a.bottom - a.top) * 0.28;
+            const laneH = wf.b ? bandH / 2 : bandH;
+            const halfH = (laneH / 2) * 0.9;
+            const drawLane = (peaks, laneTop, color) => {
+              const center = laneTop + laneH / 2;
+              ctx.save();
+              ctx.fillStyle = color;
+              ctx.beginPath();
+              ctx.moveTo(a.left, center);
+              for (let i = 0; i < peaks.length; i++) {
+                const t = (i / peaks.length) * wf.duration;
+                const xPx = x.getPixelForValue(t);
+                if (xPx < a.left || xPx > a.right) continue;
+                ctx.lineTo(xPx, center - peaks[i] * halfH);
+              }
+              ctx.lineTo(a.right, center);
+              for (let i = peaks.length - 1; i >= 0; i--) {
+                const t = (i / peaks.length) * wf.duration;
+                const xPx = x.getPixelForValue(t);
+                if (xPx < a.left || xPx > a.right) continue;
+                ctx.lineTo(xPx, center + peaks[i] * halfH);
+              }
+              ctx.closePath();
+              ctx.fill();
+              ctx.restore();
+            };
+            // Stack at the bottom: B-leg flush to floor, A-leg in the lane above.
+            const bTop = a.bottom - laneH;
+            const aTop = wf.b ? bTop - laneH : a.bottom - laneH;
+            drawLane(wf.a, aTop, 'rgba(129, 140, 248, 0.25)');
+            if (wf.b) drawLane(wf.b, bTop, 'rgba(52, 211, 153, 0.25)');
+          },
+        }, {
+          id: 'playhead',
+          afterDatasetsDraw(chart) {
+            const t = window.__playheadTime;
+            if (t == null) return;
+            const { ctx, chartArea: a, scales: { x } } = chart;
+            const xPx = x.getPixelForValue(t);
+            if (xPx < a.left || xPx > a.right) return;
+            ctx.save();
+            ctx.strokeStyle = 'rgba(248, 250, 252, 0.85)';
+            ctx.lineWidth = 1.5;
+            ctx.beginPath();
+            ctx.moveTo(xPx, a.top);
+            ctx.lineTo(xPx, a.bottom);
+            ctx.stroke();
+            ctx.restore();
+          },
         }],
       });
+
     }
 
     init();
+
+    // Decode the call audio in the browser and hand peaks to the waveform plugin.
+    (async function loadWaveform() {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      try {
+        const resp = await fetch('/audio/{{ job_id }}');
+        if (!resp.ok) return;
+        const arr = await resp.arrayBuffer();
+        const ac = new AC();
+        const buf = await ac.decodeAudioData(arr);
+        const PEAKS = 1500;
+        const sps = Math.max(1, Math.floor(buf.length / PEAKS));
+        const peakOf = (idx) => {
+          const ch = buf.getChannelData(idx);
+          const out = new Float32Array(PEAKS);
+          for (let i = 0; i < PEAKS; i++) {
+            const s = i * sps, e = Math.min(ch.length, s + sps);
+            let mx = 0;
+            for (let j = s; j < e; j++) {
+              const v = Math.abs(ch[j]);
+              if (v > mx) mx = v;
+            }
+            out[i] = mx;
+          }
+          return out;
+        };
+        window.__waveform = {
+          duration: buf.duration,
+          a: peakOf(0),
+          b: buf.numberOfChannels > 1 ? peakOf(1) : null,
+        };
+        if (ac.close) ac.close();
+        if (window.currentChart) window.currentChart.draw();
+      } catch (err) {
+        console.warn('waveform decode failed', err);
+      }
+    })();
+
+    const audio = document.getElementById('call-audio');
+    const toggle = document.getElementById('play-toggle');
+    const playIcon = document.getElementById('play-icon');
+    const pauseIcon = document.getElementById('pause-icon');
+    const timeEl = document.getElementById('play-time');
+    if (!audio || !toggle) return;
+
+    let rafId = null;
+    const setIcon = (playing) => {
+      playIcon.classList.toggle('hidden', playing);
+      pauseIcon.classList.toggle('hidden', !playing);
+      toggle.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+    };
+
+    const tick = () => {
+      window.__playheadTime = audio.currentTime;
+      if (timeEl) timeEl.textContent = fmtMmss(audio.currentTime);
+      if (window.currentChart) window.currentChart.draw();
+      rafId = requestAnimationFrame(tick);
+    };
+    const stopTick = () => {
+      if (rafId != null) cancelAnimationFrame(rafId);
+      rafId = null;
+    };
+
+    toggle.addEventListener('click', () => {
+      if (audio.paused) audio.play(); else audio.pause();
+    });
+    audio.addEventListener('play', () => { setIcon(true); stopTick(); tick(); });
+    audio.addEventListener('pause', () => { setIcon(false); stopTick(); });
+    audio.addEventListener('ended', () => {
+      setIcon(false);
+      stopTick();
+      window.__playheadTime = 0;
+      if (timeEl) timeEl.textContent = fmtMmss(0);
+      if (window.currentChart) window.currentChart.draw();
+    });
   })();
 </script>
