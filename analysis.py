@@ -321,10 +321,14 @@ def result_to_template_context(result: AnalysisResult) -> dict:
             "status": leg.status(),
         }
 
+    # Plot/report each window at its center so the dot sits at the midpoint
+    # of the 8s of audio it scored — symmetric on both sides of the playhead.
+    score_offset = WINDOW_SECONDS / 2
+
     def chart_points(leg: LegResult) -> list[dict]:
         return [
             {
-                "t": round(w.start_s, 3),
+                "t": round(w.start_s + score_offset, 3),
                 "mos": (None if w.silent else round(w.mos, 3)),
                 "silent": w.silent,
                 "rms": round(w.rms, 5),
@@ -336,7 +340,7 @@ def result_to_template_context(result: AnalysisResult) -> dict:
         voiced = [w for w in leg.windows if not w.silent and w.mos is not None]
         voiced.sort(key=lambda w: w.mos)
         return [
-            {"timestamp": round(w.start_s, 2), "mos": round(w.mos, 2)}
+            {"timestamp": round(w.start_s + score_offset, 2), "mos": round(w.mos, 2)}
             for w in voiced[:n]
         ]
 
