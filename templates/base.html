@@ -115,6 +115,29 @@
 
   </main>
 
+  <div id="busy-overlay"
+       class="fixed inset-0 z-50 hidden items-center justify-center
+              bg-slate-950/70 backdrop-blur-md
+              opacity-0 transition-opacity duration-150">
+    <div class="rounded-2xl bg-slate-900/90 ring-1 ring-slate-800
+                shadow-2xl shadow-black/40 px-8 py-6
+                flex flex-col items-center gap-4 min-w-[300px]">
+      <svg class="animate-spin h-8 w-8 text-indigo-400" xmlns="http://www.w3.org/2000/svg"
+           fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor"
+              d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+      </svg>
+      <div id="busy-label" class="text-sm font-medium text-slate-200">Uploading&hellip;</div>
+      <div id="busy-bar-wrap" class="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+        <div id="busy-bar" class="h-full bg-indigo-500 transition-[width] duration-100" style="width:0%"></div>
+      </div>
+      <div id="busy-detail" class="text-xs text-slate-500 text-center">
+        Long recordings may take a while &mdash; please don't refresh.
+      </div>
+    </div>
+  </div>
+
   <script>
     (function () {
       const dz = document.getElementById('drop-zone');
@@ -152,6 +175,56 @@
           setFile(f);
         }
       });
+
+      const overlay = document.getElementById('busy-overlay');
+      const label = document.getElementById('busy-label');
+      const bar = document.getElementById('busy-bar');
+      const barWrap = document.getElementById('busy-bar-wrap');
+      const detail = document.getElementById('busy-detail');
+      const form = document.getElementById('upload-form');
+      let hideTimer = null;
+
+      function showOverlay() {
+        if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+        bar.style.width = '0%';
+        barWrap.classList.remove('hidden');
+        label.textContent = 'Uploading… 0%';
+        detail.textContent = "Long recordings may take a while — please don't refresh.";
+        overlay.classList.remove('hidden');
+        overlay.classList.add('flex');
+        // Next frame so the transition fires.
+        requestAnimationFrame(() => overlay.classList.replace('opacity-0', 'opacity-100'));
+      }
+
+      function hideOverlay() {
+        overlay.classList.replace('opacity-100', 'opacity-0');
+        hideTimer = setTimeout(() => {
+          overlay.classList.add('hidden');
+          overlay.classList.remove('flex');
+          hideTimer = null;
+        }, 150);
+      }
+
+      function switchToProcessing() {
+        barWrap.classList.add('hidden');
+        label.textContent = 'Starting analysis…';
+        detail.textContent = '';
+      }
+
+      form.addEventListener('htmx:beforeRequest', showOverlay);
+      form.addEventListener('htmx:xhr:progress', e => {
+        const { loaded, total } = e.detail;
+        if (!total) return;
+        const pct = Math.min(100, Math.round((loaded / total) * 100));
+        bar.style.width = pct + '%';
+        if (loaded >= total) {
+          switchToProcessing();
+        } else {
+          label.textContent = `Uploading… ${pct}%`;
+        }
+      });
+      ['htmx:afterRequest', 'htmx:responseError', 'htmx:sendError', 'htmx:timeout'].forEach(ev =>
+        form.addEventListener(ev, hideOverlay));
     })();
   </script>
 </body>
