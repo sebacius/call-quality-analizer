@@ -1,0 +1,280 @@
+{% macro mos_color(m) -%}
+  {%- if m is none -%}text-slate-500
+  {%- elif m >= 4.0 -%}text-emerald-400
+  {%- elif m >= 3.0 -%}text-amber-400
+  {%- else -%}text-rose-400
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro status_pill(s) -%}
+  {%- if s == "Excellent" -%}bg-emerald-500/10 text-emerald-300 ring-emerald-500/30
+  {%- elif s == "Good" -%}bg-emerald-500/10 text-emerald-300 ring-emerald-500/30
+  {%- elif s == "Fair" -%}bg-amber-500/10 text-amber-300 ring-amber-500/30
+  {%- elif s == "Poor" -%}bg-rose-500/10 text-rose-300 ring-rose-500/30
+  {%- else -%}bg-slate-800 text-slate-300 ring-slate-700
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro fmt_mmss(t) -%}
+  {%- if t is none -%}—{%- else -%}{{ '%d:%02d'|format((t // 60)|int, (t % 60)|int) }}{%- endif -%}
+{%- endmacro %}
+
+{% macro fmt_num(v, digits=2) -%}
+  {%- if v is none -%}—{%- else -%}{{ '%.*f'|format(digits, v) }}{%- endif -%}
+{%- endmacro %}
+
+{% macro fmt_pct(v) -%}
+  {%- if v is none -%}—{%- else -%}{{ '%.0f%%'|format(v * 100) }}{%- endif -%}
+{%- endmacro %}
+
+<div class="space-y-6">
+
+  {# Header strip #}
+  <div class="rounded-2xl bg-slate-900 ring-1 ring-slate-800 shadow-lg shadow-black/30 p-4 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
+    <div class="flex items-center gap-2 text-slate-200 font-medium">
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4 text-slate-500">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+        <polyline points="14 2 14 8 20 8"/>
+      </svg>
+      <span class="truncate max-w-[28ch]">{{ filename }}</span>
+    </div>
+    <div class="text-slate-500">Duration: <span class="text-slate-200 font-medium">{{ fmt_mmss(duration_seconds) }}</span></div>
+    <div class="text-slate-500">Analyzed: <span class="text-slate-200 font-medium">{{ analyzed_at }}</span></div>
+  </div>
+
+  {# Leg cards — side-by-side for stereo, single full-width card for mono. #}
+  {% set legs = [(leg_a, 'indigo')] %}
+  {% if is_stereo %}{% set legs = legs + [(leg_b, 'emerald')] %}{% endif %}
+  <div class="grid gap-5 {% if is_stereo %}grid-cols-1 md:grid-cols-2{% else %}grid-cols-1{% endif %}">
+    {% for leg, accent in legs %}
+    <div class="rounded-2xl bg-slate-900 ring-1 ring-slate-800 shadow-xl shadow-black/30 p-6">
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <span class="h-2.5 w-2.5 rounded-full {% if accent == 'indigo' %}bg-indigo-400 shadow-[0_0_10px_rgba(129,140,248,0.6)]{% else %}bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.6)]{% endif %}"></span>
+          <h3 class="text-sm font-semibold text-slate-200">{{ leg.label }}</h3>
+        </div>
+        <span class="inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset {{ status_pill(leg.status) }}">
+          {{ leg.status }}
+        </span>
+      </div>
+
+      <div class="mt-5 flex items-baseline gap-2">
+        <span class="text-5xl font-bold tracking-tight {{ mos_color(leg.mos_median) }}">{{ fmt_num(leg.mos_median, 2) }}</span>
+        <span class="text-sm text-slate-500">median MOS</span>
+      </div>
+
+      <dl class="mt-6 grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-500">P10 (worst-decile)</dt>
+          <dd class="text-slate-100 font-medium">{{ fmt_num(leg.mos_p10, 2) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-500">P90 (best-decile)</dt>
+          <dd class="text-slate-100 font-medium">{{ fmt_num(leg.mos_p90, 2) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-500">% windows below 3</dt>
+          <dd class="text-slate-100 font-medium">{{ fmt_pct(leg.pct_below_3) }}</dd>
+        </div>
+        <div>
+          <dt class="text-xs uppercase tracking-wide text-slate-500">Voiced duration</dt>
+          <dd class="text-slate-100 font-medium">{{ fmt_mmss(leg.voiced_seconds) }}</dd>
+        </div>
+      </dl>
+    </div>
+    {% endfor %}
+  </div>
+
+  {# Chart card #}
+  <div class="rounded-2xl bg-slate-900 ring-1 ring-slate-800 shadow-xl shadow-black/30 p-6">
+    <div class="flex items-center justify-between mb-4">
+      <h3 class="text-sm font-semibold text-slate-200">Quality over time</h3>
+      <div class="flex items-center gap-4 text-xs text-slate-400">
+        <span class="inline-flex items-center gap-1.5"><span class="h-2 w-2 rounded-full bg-indigo-400"></span>{% if is_stereo %}A-leg{% else %}Mono{% endif %}</span>
+        {% if is_stereo %}
+        <span class="inline-flex items-center gap-1.5"><span class="h-2 w-2 rounded-full bg-emerald-400"></span>B-leg</span>
+        {% endif %}
+      </div>
+    </div>
+    <div class="relative h-[360px]">
+      <canvas id="mos-chart"></canvas>
+    </div>
+  </div>
+
+  {# Worst moments — match the leg-card layout. #}
+  {% set worst_rows = [(leg_a.label, leg_a_worst, 'indigo')] %}
+  {% if is_stereo %}{% set worst_rows = worst_rows + [(leg_b.label, leg_b_worst, 'emerald')] %}{% endif %}
+  <div class="grid gap-5 {% if is_stereo %}grid-cols-1 md:grid-cols-2{% else %}grid-cols-1{% endif %}">
+    {% for leg_label, items, accent in worst_rows %}
+    <div class="rounded-2xl bg-slate-900 ring-1 ring-slate-800 shadow-lg shadow-black/30 p-5">
+      <h4 class="text-sm font-semibold text-slate-200">Worst moments &mdash; {{ leg_label }}</h4>
+      {% if items %}
+      <ul class="mt-3 divide-y divide-slate-800">
+        {% for it in items %}
+        <li class="flex items-center justify-between py-2 text-sm">
+          <span class="text-slate-400 tabular-nums">{{ fmt_mmss(it.timestamp) }}</span>
+          <span class="font-semibold {{ mos_color(it.mos) }}">MOS {{ fmt_num(it.mos, 2) }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% else %}
+      <p class="mt-3 text-sm text-slate-500">No voiced windows detected on this leg.</p>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</div>
+
+<script type="application/json" id="chart-data">{{ chart_data_json|safe }}</script>
+
+<script>
+  (function () {
+    const raw = document.getElementById('chart-data');
+    if (!raw) return;
+    const data = JSON.parse(raw.textContent);
+
+    const fmtMmss = (s) => {
+      if (s === null || s === undefined) return '';
+      const m = Math.floor(s / 60);
+      const r = Math.floor(s % 60);
+      return `${m}:${String(r).padStart(2, '0')}`;
+    };
+
+    function buildSeries(points, color) {
+      const voiced = points.map(p => ({ x: p.t, y: p.silent ? null : p.mos }));
+      return {
+        label: '',
+        data: voiced,
+        borderColor: color,
+        backgroundColor: color,
+        borderWidth: 2,
+        tension: 0.25,
+        spanGaps: false,
+        pointRadius: points.map(p => p.silent ? 0 : 3),
+        pointHoverRadius: 4,
+      };
+    }
+
+    function silentMarkers(points, color) {
+      return {
+        label: '',
+        data: points.map(p => ({ x: p.t, y: p.silent ? 1.2 : null })),
+        borderColor: color,
+        backgroundColor: color,
+        borderWidth: 1,
+        borderDash: [4, 4],
+        pointRadius: 0,
+        showLine: false,
+        spanGaps: false,
+      };
+    }
+
+    // Tailwind indigo-400 / emerald-400 for line series; muted variants for silent.
+    const A_COLOR = 'rgb(129, 140, 248)';
+    const B_COLOR = 'rgb(52, 211, 153)';
+    const A_MUTED = 'rgba(129, 140, 248, 0.45)';
+    const B_MUTED = 'rgba(52, 211, 153, 0.45)';
+
+    const hasB = Array.isArray(data.leg_b);
+    const aLabel = hasB ? 'A-leg' : 'Mono';
+    const datasets = [
+      Object.assign(buildSeries(data.leg_a, A_COLOR), { label: aLabel }),
+      Object.assign(silentMarkers(data.leg_a, A_MUTED), { label: aLabel + ' silent' }),
+    ];
+    if (hasB) {
+      datasets.splice(1, 0, Object.assign(buildSeries(data.leg_b, B_COLOR), { label: 'B-leg' }));
+      datasets.push(Object.assign(silentMarkers(data.leg_b, B_MUTED), { label: 'B-leg silent' }));
+    }
+
+    function init() {
+      if (typeof Chart === 'undefined') {
+        return setTimeout(init, 60);
+      }
+      const ctx = document.getElementById('mos-chart');
+      if (!ctx) return;
+
+      try { window.currentChart && window.currentChart.destroy(); } catch (e) {}
+
+      // slate-400 for ticks / titles, subtle slate-700 for grid.
+      const TICK = '#94a3b8';
+      const GRID = 'rgba(148, 163, 184, 0.12)';
+
+      window.currentChart = new Chart(ctx, {
+        type: 'line',
+        data: { datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          color: TICK,
+          scales: {
+            x: {
+              type: 'linear',
+              title: { display: true, text: 'Time (mm:ss)', color: TICK },
+              ticks: { callback: (v) => fmtMmss(v), color: TICK },
+              grid: { color: GRID },
+              border: { color: GRID },
+            },
+            y: {
+              min: 1.0, max: 5.0,
+              title: { display: true, text: 'MOS', color: TICK },
+              ticks: { color: TICK },
+              grid: { color: GRID },
+              border: { color: GRID },
+            },
+          },
+          plugins: {
+            legend: {
+              labels: {
+                filter: (item) => !item.text.endsWith('silent'),
+                color: '#cbd5e1',
+              },
+            },
+            tooltip: {
+              backgroundColor: 'rgba(2, 6, 23, 0.92)',
+              titleColor: '#e2e8f0',
+              bodyColor: '#e2e8f0',
+              borderColor: 'rgba(148,163,184,0.25)',
+              borderWidth: 1,
+              callbacks: {
+                title: (items) => items.length ? `Time ${fmtMmss(items[0].parsed.x)}` : '',
+                label: (item) => {
+                  if (item.dataset.label && item.dataset.label.endsWith('silent')) return null;
+                  if (item.parsed.y === null || item.parsed.y === undefined) return null;
+                  return `${item.dataset.label}: MOS ${item.parsed.y.toFixed(2)}`;
+                },
+              },
+            },
+          },
+        },
+        plugins: [{
+          id: 'refLines',
+          afterDraw(chart) {
+            const { ctx, chartArea: a, scales: { y } } = chart;
+            const drawLine = (val, color) => {
+              const yPx = y.getPixelForValue(val);
+              ctx.save();
+              ctx.strokeStyle = color;
+              ctx.setLineDash([6, 4]);
+              ctx.lineWidth = 1;
+              ctx.beginPath();
+              ctx.moveTo(a.left, yPx);
+              ctx.lineTo(a.right, yPx);
+              ctx.stroke();
+              ctx.fillStyle = color;
+              ctx.font = '11px Inter, sans-serif';
+              ctx.fillText(`MOS ${val.toFixed(1)}`, a.left + 6, yPx - 4);
+              ctx.restore();
+            };
+            // amber-400 / emerald-400 for thresholds.
+            drawLine(3.0, 'rgba(251, 191, 36, 0.85)');
+            drawLine(4.0, 'rgba(52, 211, 153, 0.85)');
+          },
+        }],
+      });
+    }
+
+    init();
+  })();
+</script>
