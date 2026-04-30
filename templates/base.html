@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>Call Quality Analyzer</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+          },
+        },
+      },
+    };
+  </script>
+
+  <script src="https://unpkg.com/htmx.org@1.9.12" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js" defer></script>
+
+  <style>
+    body { font-family: 'Inter', ui-sans-serif, system-ui, sans-serif; }
+    .htmx-indicator { display: none; }
+    .htmx-request .htmx-indicator { display: flex; }
+    .htmx-request.htmx-indicator { display: flex; }
+    .drop-zone.dragover { border-color: rgb(129 140 248); background-color: rgb(99 102 241 / 0.12); }
+    form.htmx-request #btn-arrow { display: none; }
+    form.htmx-request #btn-spinner { display: inline-block; }
+    form.htmx-request #btn-label::after { content: "ing\2026"; }
+  </style>
+</head>
+<body class="min-h-screen bg-slate-950 text-slate-100 antialiased">
+
+  <header class="border-b border-slate-800 bg-slate-900/80 backdrop-blur supports-[backdrop-filter]:bg-slate-900/60">
+    <div class="mx-auto max-w-6xl px-6 py-5 flex items-center justify-between">
+      <div class="flex items-center gap-3">
+        <div class="h-9 w-9 rounded-xl bg-indigo-500 text-white grid place-items-center shadow-lg shadow-indigo-500/30 ring-1 ring-indigo-400/40">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-5 w-5">
+            <path d="M3 12h3l3-9 4 18 3-9h5"/>
+          </svg>
+        </div>
+        <div>
+          <h1 class="text-lg font-semibold tracking-tight text-slate-100">Call Quality Analyzer</h1>
+          <p class="text-xs text-slate-400">Powered by Distill-MOS</p>
+        </div>
+      </div>
+      <a href="https://github.com/microsoft/Distill-MOS" target="_blank" rel="noreferrer"
+         class="text-xs font-medium text-slate-400 hover:text-slate-100 transition-colors">microsoft/Distill-MOS &rarr;</a>
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-6xl px-6 py-8 space-y-6">
+
+    <section class="sticky top-4 z-10">
+      <div class="rounded-2xl bg-slate-900/90 backdrop-blur shadow-2xl shadow-black/40 ring-1 ring-slate-800 p-5">
+        <form id="upload-form"
+              hx-post="/analyze"
+              hx-target="#results"
+              hx-swap="innerHTML"
+              hx-encoding="multipart/form-data"
+              hx-disabled-elt="this"
+              hx-indicator="#results"
+              class="flex flex-col md:flex-row md:items-center gap-4">
+
+          <label id="drop-zone"
+                 for="file-input"
+                 class="drop-zone flex-1 cursor-pointer rounded-xl border-2 border-dashed border-slate-700 bg-slate-800/40 hover:bg-slate-800/70 transition-colors h-[120px] flex items-center justify-center px-4">
+            <div class="flex items-center gap-3 text-slate-300">
+              <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                   stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="h-7 w-7 text-slate-500">
+                <path d="M12 16V4M12 4l-4 4M12 4l4 4"/>
+                <path d="M4 16v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>
+              </svg>
+              <div class="text-sm leading-5">
+                <div class="font-medium text-slate-200">
+                  <span id="dz-prompt">Drop a WAV here, or click to choose a file</span>
+                  <span id="dz-filename" class="hidden text-indigo-300"></span>
+                </div>
+                <div class="text-xs text-slate-500">
+                  Stereo (channel 0 = A-leg, channel 1 = B-leg) or mono. Up to 100 MB.
+                </div>
+              </div>
+            </div>
+            <input id="file-input" name="file" type="file" accept=".wav,audio/wav,audio/x-wav" class="hidden" />
+          </label>
+
+          <button id="analyze-btn" type="submit" disabled
+                  class="md:w-40 inline-flex items-center justify-center gap-2 rounded-xl bg-indigo-500 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-indigo-500/20 ring-1 ring-indigo-400/30 hover:bg-indigo-400 disabled:bg-slate-700 disabled:text-slate-400 disabled:shadow-none disabled:ring-slate-700 disabled:cursor-not-allowed transition-colors">
+            <svg id="btn-arrow" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="h-4 w-4">
+              <path d="M5 12h14M13 5l7 7-7 7"/>
+            </svg>
+            <svg id="btn-spinner" class="hidden h-4 w-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path>
+            </svg>
+            <span id="btn-label">Analyze</span>
+          </button>
+        </form>
+      </div>
+    </section>
+
+    <section id="results" class="min-h-[280px]">
+      {% include "empty.html" %}
+    </section>
+
+  </main>
+
+  <script>
+    (function () {
+      const dz = document.getElementById('drop-zone');
+      const input = document.getElementById('file-input');
+      const btn = document.getElementById('analyze-btn');
+      const promptEl = document.getElementById('dz-prompt');
+      const fnEl = document.getElementById('dz-filename');
+
+      function setFile(f) {
+        if (!f) {
+          btn.disabled = true;
+          promptEl.classList.remove('hidden');
+          fnEl.classList.add('hidden');
+          fnEl.textContent = '';
+          return;
+        }
+        btn.disabled = false;
+        promptEl.classList.add('hidden');
+        fnEl.classList.remove('hidden');
+        fnEl.textContent = f.name;
+      }
+
+      input.addEventListener('change', () => setFile(input.files[0] || null));
+
+      ['dragenter', 'dragover'].forEach(ev =>
+        dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('dragover'); }));
+      ['dragleave', 'drop'].forEach(ev =>
+        dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('dragover'); }));
+      dz.addEventListener('drop', e => {
+        const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+        if (f) {
+          const dt = new DataTransfer();
+          dt.items.add(f);
+          input.files = dt.files;
+          setFile(f);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
